@@ -59,19 +59,19 @@ ffufai is an AI-powered wrapper for the popular web fuzzer ffuf. It automaticall
 
 6. Set up your API key as an environment variable :
 
-   For OpenAI :
+   OpenAI :
    ```
    export OPENAI_API_KEY='your-api-key-here'
    ```
-   or Anthropic :
+   Anthropic :
    ```
    export ANTHROPIC_API_KEY='your-api-key-here'
    ```
-   For Gemini :
+   Gemini :
    ```
    export GEMINI_API_KEY="your-api-key-here"
    ```
-   or Hugging Face :
+   Hugging Face :
    ```
    export HUGGINGFACE_API_KEY=your-api-key-here        ## no '' 
    ```
