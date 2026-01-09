@@ -6,191 +6,224 @@ import subprocess
 import requests
 import json
 import shutil
+import re
+from urllib.parse import urlparse
+
 from openai import OpenAI
 import anthropic
-from urllib.parse import urlparse
-import re
 
+# -------------------------
+# API KEY SELECTION
+# -------------------------
 def get_api_key():
-    openai_key = os.getenv('OPENAI_API_KEY')
-    anthropic_key = os.getenv('ANTHROPIC_API_KEY')
-    hf_key = os.getenv('HUGGINGFACE_API_KEY')
-    if anthropic_key:
-        return ('anthropic', anthropic_key)
-    elif openai_key:
-        return ('openai', openai_key)
-    elif hf_key:
-        return ('huggingface', hf_key)
+    if os.getenv("GEMINI_API_KEY"):
+        return ("gemini", os.getenv("GEMINI_API_KEY"))
+    elif os.getenv("ANTHROPIC_API_KEY"):
+        return ("anthropic", os.getenv("ANTHROPIC_API_KEY"))
+    elif os.getenv("OPENAI_API_KEY"):
+        return ("openai", os.getenv("OPENAI_API_KEY"))
+    elif os.getenv("HUGGINGFACE_API_KEY"):
+        return ("huggingface", os.getenv("HUGGINGFACE_API_KEY"))
     else:
-        raise ValueError("No API key found. Please set OPENAI_API_KEY, ANTHROPIC_API_KEY, or HUGGINGFACE_API_KEY.")
+        raise ValueError(
+            "No API key found. Set one of: GEMINI_API_KEY, ANTHROPIC_API_KEY, "
+            "OPENAI_API_KEY, or HUGGINGFACE_API_KEY."
+        )
 
+# -------------------------
+# HEADER FETCH
+# -------------------------
 def get_headers(url):
     try:
         response = requests.head(url, allow_redirects=True, timeout=5)
         return dict(response.headers)
     except requests.RequestException as e:
         print(f"Error fetching headers: {e}")
-        return {"Header": "Error fetching headers."}
+        return {}
 
+# -------------------------
+# AI EXTENSION GENERATION
+# -------------------------
 def get_ai_extensions(url, headers, api_type, api_key, max_extensions):
     prompt = f"""
-Given the following URL and HTTP headers, suggest the most likely file extensions for fuzzing this endpoint.
-Respond with a JSON object containing a list of extensions. The response will be parsed with json.loads(),
-so it must be valid JSON. No preamble or yapping. Use the format: {{"extensions": [".ext1", ".ext2", ...]}}.
-Do not suggest more than {max_extensions}, but only suggest extensions that make sense.
+Given the following URL and HTTP headers, suggest the most likely file extensions
+for fuzzing this endpoint.
+
+Respond with valid JSON only, no commentary.
+Format:
+{{"extensions": [".php", ".json", ".bak"]}}
+
+Limit to at most {max_extensions} extensions.
 
 URL: {url}
 Headers: {headers}
-
-JSON Response:
 """
 
-    if api_type == 'openai':
+    system_msg = (
+        "You are a security assistant helping with web fuzzing. "
+        "Return only valid JSON. No prose."
+    )
+
+    # ---------- OpenAI ----------
+    if api_type == "openai":
         client = OpenAI(api_key=api_key)
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that suggests file extensions for fuzzing based on URL and headers."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        raw_content = response.choices[0].message.content.strip()
-        print("AI Raw Content:", raw_content)
-
-    elif api_type == 'anthropic':
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
-            max_tokens=1000,
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt},
+            ],
             temperature=0,
-            system="You are a helpful assistant that suggests file extensions for fuzzing based on URL and headers.",
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
         )
-        raw_content = message.content[0].text.strip()
-        print("AI Raw Content:", raw_content)
+        raw = response.choices[0].message.content.strip()
 
-    elif api_type == 'huggingface':
+    # ---------- Anthropic ----------
+    elif api_type == "anthropic":
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-3-5-sonnet-20240620",
+            max_tokens=500,
+            temperature=0,
+            system=system_msg,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+
+    # ---------- Gemini ----------
+    elif api_type == "gemini":
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            "gemini-1.5-pro",
+            generation_config={
+                "temperature": 0,
+                "response_mime_type": "application/json",
+            },
+        )
+
+        resp = model.generate_content(
+            f"SYSTEM:\n{system_msg}\n\nUSER:\n{prompt}"
+        )
+        raw = resp.text.strip()
+
+    # ---------- Local HuggingFace (Qwen) ----------
+    elif api_type == "huggingface":
         from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
 
-        print(" ﾒ૦ﾒ૦ 💋💋💋 ﾒ૦ﾒ૦ Loading Qwen model locally...")
+        print("🤖 Loading local Qwen model…")
 
         model_name = "Qwen/Qwen2.5-1.5B-Instruct"
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto"
+            device_map="auto",
         )
 
         messages = [
-            {"role": "system", "content": "You are a helpful assistant that suggests file extensions for fuzzing based on URL and headers."},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": prompt},
         ]
 
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
-        generated_ids = model.generate(
-            **model_inputs,
-            max_new_tokens=512,
+        output = model.generate(
+            **inputs,
+            max_new_tokens=300,
             do_sample=False,
-            temperature=0.5
         )
 
-        generated_ids = [
-            output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-        ]
-
-        raw_content = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        print("AI Raw Content:", raw_content)
+        output = output[:, inputs["input_ids"].shape[1]:]
+        raw = tokenizer.decode(output[0], skip_special_tokens=True).strip()
 
     else:
         raise ValueError("Unsupported API type")
 
     try:
-        return json.loads(raw_content)
+        return json.loads(raw)
     except json.JSONDecodeError:
-        print("❌ Failed to parse AI output. Response:", raw_content)
+        print("❌ AI returned invalid JSON:")
+        print(raw)
         raise
 
+# -------------------------
+# FFUF OUTPUT COLORIZER
+# -------------------------
 def colorize_ffuf_output(line):
-    line = line.decode(errors='ignore').strip()
-    status_match = re.search(r'\[Status: (\d{3})', line)
-    if status_match:
-        status_code = int(status_match.group(1))
-        if status_code == 200:
-            color = '\033[92m'  # Green
-        elif status_code == 301:
-            color = '\033[94m'  # Blue
-        elif status_code == 403:
-            color = '\033[91m'  # Red
+    line = line.decode(errors="ignore").strip()
+    m = re.search(r"\[Status: (\d{3})", line)
+    if m:
+        code = int(m.group(1))
+        if code == 200:
+            color = "\033[92m"
+        elif code in (301, 302):
+            color = "\033[94m"
+        elif code == 403:
+            color = "\033[91m"
         else:
-            color = '\033[0m'   # Default
-        reset = '\033[0m'
-        print(f"{color}{line}{reset}")
+            color = "\033[0m"
+        print(f"{color}{line}\033[0m")
     else:
-        # Optionally parse ffuf's built-in progress:
-        progress_match = re.search(r'Progress: \[(\d+)/(\d+)\]', line)
-        if progress_match:
-            current, total = progress_match.groups()
-            print(f"\033[93m🔄 Progress: {current}/{total} requests\033[0m")
-        else:
-            print(line)
+        print(line)
 
+# -------------------------
+# MAIN
+# -------------------------
 def main():
-    parser = argparse.ArgumentParser(description='ffufai - AI-powered ffuf wrapper')
-    parser.add_argument('--ffuf-path', default='ffuf', help='Path to ffuf executable')
-    parser.add_argument('--max-extensions', type=int, default=5, help='Maximum number of extensions to suggest')
+    parser = argparse.ArgumentParser(
+        description="ffufai – AI-powered ffuf wrapper (OpenAI / Claude / Gemini / Local)"
+    )
+    parser.add_argument("--ffuf-path", default="ffuf")
+    parser.add_argument("--max-extensions", type=int, default=5)
     args, unknown = parser.parse_known_args()
 
     try:
-        url_index = unknown.index('-u') + 1
-        url = unknown[url_index]
+        url = unknown[unknown.index("-u") + 1]
     except (ValueError, IndexError):
-        print("Error: -u URL argument is required.")
+        print("❌ You must provide -u URL")
         return
 
-    parsed_url = urlparse(url)
-    path_parts = parsed_url.path.split('/')
+    parsed = urlparse(url)
+    if "FUZZ" not in parsed.path:
+        print("⚠️ FUZZ keyword not found in URL path")
 
-    if 'FUZZ' not in path_parts[-1]:
-        print("⚠️ Warning: FUZZ keyword is not at the end of the URL path. Extension fuzzing may not work as expected.")
-
-    base_url = url.replace('FUZZ', '')
+    base_url = url.replace("FUZZ", "")
     headers = get_headers(base_url)
 
     api_type, api_key = get_api_key()
-    try:
-        extensions_data = get_ai_extensions(url, headers, api_type, api_key, args.max_extensions)
-        print("Extensions JSON:", extensions_data)
-
-        if not extensions_data.get('extensions'):
-            print("⚠️ No extensions returned by AI. Using fallback list.")
-            extensions_data = {"extensions": [".php", ".html", ".txt", ".bak"]}
-
-        extensions_list = extensions_data['extensions'][:args.max_extensions]
-        extensions = ','.join(ext if ext.startswith('.') else f'.{ext}' for ext in extensions_list)
-
-    except (json.JSONDecodeError, KeyError) as e:
-        print(f"❌ Error parsing AI response. Try again. Error: {e}")
-        return
-
-    ffuf_command = [args.ffuf_path] + unknown + ['-e', extensions]
-
-    if not os.path.isfile(args.ffuf_path) and not shutil.which(args.ffuf_path):
-        print(f"❌ Error: ffuf binary not found at {args.ffuf_path}")
-        return
+    print(f"🔌 Using AI backend: {api_type}")
 
     try:
-        print(f"▶️ Running: {' '.join(ffuf_command)}")
-        with subprocess.Popen(ffuf_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
-            for line in proc.stdout:
-                colorize_ffuf_output(line)
+        ext_data = get_ai_extensions(
+            url, headers, api_type, api_key, args.max_extensions
+        )
+        exts = ext_data.get("extensions", [])
+        if not exts:
+            raise ValueError("Empty extension list")
     except Exception as e:
-        print(f"❌ Error running ffuf: {e}")
+        print(f"⚠️ AI failed, using fallback extensions: {e}")
+        exts = [".php", ".html", ".json", ".bak"]
 
-if __name__ == '__main__':
+    exts = exts[: args.max_extensions]
+    exts = ",".join(e if e.startswith(".") else f".{e}" for e in exts)
+
+    ffuf_cmd = [args.ffuf_path] + unknown + ["-e", exts]
+
+    if not shutil.which(args.ffuf_path):
+        print("❌ ffuf binary not found")
+        return
+
+    print("▶️ Running:", " ".join(ffuf_cmd))
+    with subprocess.Popen(
+        ffuf_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    ) as proc:
+        for line in proc.stdout:
+            colorize_ffuf_output(line)
+
+if __name__ == "__main__":
     main()
