@@ -27,7 +27,7 @@ ffufai is an AI-powered wrapper for the popular web fuzzer ffuf. It automaticall
 
 - Python 3.6+
 - ffuf (installed and accessible in your PATH)
-- An OpenAI API key or Anthropic API key or Free Hugging Face API key 
+- An OpenAI API key | Anthropic API key | Gemini API key | Free Hugging Face API key 
 
 ## Installation
 
@@ -66,6 +66,10 @@ ffufai is an AI-powered wrapper for the popular web fuzzer ffuf. It automaticall
    or Anthropic :
    ```
    export ANTHROPIC_API_KEY='your-api-key-here'
+   ```
+   For Gemini :
+   ```
+   export GEMINI_API_KEY="your-api-key-here"
    ```
    or Hugging Face :
    ```
